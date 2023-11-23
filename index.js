@@ -3,6 +3,7 @@ const app = express();
 const cors = require('cors');
 var jwt = require('jsonwebtoken');
 require('dotenv').config()
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
 
 // middleware
@@ -30,6 +31,7 @@ async function run() {
     const menuCollection = client.db('bistro_boss').collection('menu');
     const reviewsCollection = client.db('bistro_boss').collection('reviews');
     const cartsCollection = client.db('bistro_boss').collection('carts');
+    const paymentsCollection = client.db('bistro_boss').collection('payments');
 
 
     app.post('/jwt', async (req, res) => {
@@ -182,6 +184,68 @@ async function run() {
       const query = { _id: new ObjectId(id) };
       const result = await cartsCollection.deleteOne(query);
       res.send(result);
+    });
+
+
+    // Payment intent
+    app.post('/create-payment-intent', async (req, res) => {
+      const { price } = req.body;
+      const amount = parseFloat(price * 100);
+      const paymentIntent = await stripe.paymentIntents.create( {
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+      res.send({
+        clientSecret: paymentIntent.client_secret,
+      })
+    })
+
+    app.post('/payment', async(req, res) =>{
+      const  payment = req.body;
+      const paymentResult = await paymentsCollection.insertOne(payment);
+      console.log(payment);
+      const query = {_id: {
+        $in: payment.cartId.map(id => new ObjectId(id))
+      }}
+      const deleteCart = await cartsCollection.deleteMany(query);
+      res.send({paymentResult, deleteCart});
+    });
+
+    app.get('/payment/:email', verifyToken, async(req, res) =>{
+      const query = {email: req.params.email};
+      if(req.params.email !== req.decoded.email){
+        return res.status(403).send({message: 'Forbidden access'});
+      }
+      const payment = await paymentsCollection.find(query).toArray();
+      res.send(payment);
+    })
+
+    app.get('/admin-states', verifyToken, adminVerify, async(req, res) =>{
+      const users = await userCollection.estimatedDocumentCount();
+      const menu = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentsCollection.estimatedDocumentCount();
+
+      // This is not the best way
+      // const findOrders = await paymentsCollection.find().toArray();
+      // const totalAmount = findOrders.reduce((total, item) => total + item.price, 0);
+
+      const result = await paymentsCollection.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevinew: {$sum: '$price'}
+          }
+        }
+      ]).toArray();
+      const revenue = result.length>0 ? result[0].totalRevinew: 0;
+
+      res.send({
+        users,
+        menu,
+        orders,
+        revenue
+      })
     })
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
@@ -192,7 +256,6 @@ async function run() {
   }
 }
 run().catch(console.dir);
-
 app.get('/', (req, res) => {
   res.send('Bistro boss is sitting')
 })
